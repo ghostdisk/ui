@@ -202,6 +202,8 @@ class UIBox {
   y = 0;
   w = 0;
   h = 0;
+  /** Written by the Surface after layout: this box plus everything its subtree draws. Used for culling. */
+  extent: Rect = { x: 0, y: 0, w: 0, h: 0 };
 
   constructor(props: BoxProps = {}) {
     this.set(props);
@@ -593,6 +595,16 @@ function compileProgram(gl: WebGL2RenderingContext, vs: string, fs: string) {
   return prog;
 }
 
+function rectsOverlap(a: Rect, b: Rect) {
+  return a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
+}
+
+function unionRect(a: Rect, b: Rect): Rect {
+  const x = Math.min(a.x, b.x);
+  const y = Math.min(a.y, b.y);
+  return { x, y, w: Math.max(a.x + a.w, b.x + b.w) - x, h: Math.max(a.y + a.h, b.y + b.h) - y };
+}
+
 function intersectRect(a: Rect, b: Rect): Rect {
   const x = Math.max(a.x, b.x);
   const y = Math.max(a.y, b.y);
@@ -769,9 +781,13 @@ class Surface {
     this.updateHover(e.type === 'pointercancel' ? [] : path, x, y);
   }
 
-  /** Coalesces any number of invalidations in the same task into one render. */
+  /**
+   * Coalesces any number of invalidations in the same task into one render. Invalidations
+   * made while rendering (e.g. a widget rebuilding its children during layout) are ignored:
+   * the rest of that layout pass already picks them up.
+   */
   requestRender() {
-    if (this.pending || !this.atlasReady) return;
+    if (this.pending || this.rendering || !this.atlasReady) return;
     this.pending = true;
     queueMicrotask(() => {
       this.pending = false;
@@ -791,17 +807,30 @@ class Surface {
       canvas.height = pxH;
     }
 
-    root.layout.measure(root);
-    root.x = 0;
-    root.y = 0;
-    root.w = cssW;
-    root.h = cssH;
-    root.layout.arrange(root);
+    this.rendering = true;
+    try {
+      root.layout.measure(root);
+      root.x = 0;
+      root.y = 0;
+      root.w = cssW;
+      root.h = cssH;
+      root.layout.arrange(root);
+    } finally {
+      this.rendering = false;
+    }
+
+    this.boxCount = 0;
+    this.computeExtent(root);
 
     this.n = 0;
     this.batches = [{ start: 0, clip: null }];
     this.clips = [];
+    this.paintedCount = 0;
     const visit = (b: UIBox) => {
+      // Cull: skip the whole subtree if nothing it draws can show through the current clip.
+      const top = this.clips[this.clips.length - 1];
+      if (top && !rectsOverlap(b.extent, top)) return;
+      this.paintedCount++;
       b.paint(this);
       const clip = b.childClip();
       if (clip) this.pushClip(clip);
@@ -843,6 +872,28 @@ class Surface {
 
     this.renderCount++;
     this.onRender?.(this);
+  }
+
+  private rendering = false;
+  /** Stats from the last render. */
+  boxCount = 0;
+  paintedCount = 0;
+
+  /**
+   * Bottom-up: a box's extent covers itself plus everything its children draw (children can
+   * overflow their parent), cut down to its childClip if it has one.
+   */
+  private computeExtent(b: UIBox): Rect {
+    this.boxCount++;
+    let r: Rect = { x: b.x, y: b.y, w: b.w, h: b.h };
+    const clip = b.childClip();
+    for (const c of b.children) {
+      const e = this.computeExtent(c);
+      const visible = clip ? intersectRect(e, clip) : e;
+      if (visible.w > 0 && visible.h > 0) r = unionRect(r, visible);
+    }
+    b.extent = r;
+    return r;
   }
 
   // --- painting API used by UIBox.paint(); only valid during render()

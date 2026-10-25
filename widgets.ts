@@ -313,4 +313,79 @@ class UIScroll extends UIBox {
 // Not `scroll`: that's already window.scroll().
 const scrollBox = (props: ScrollProps = {}) => new UIScroll(props);
 
-Object.assign(window, { button, checkbox, scrollBox, UICheckbox, UIScroll });
+// ---------------------------------------------------------------------------
+// Virtual list: a vertical UIScroll whose content only holds the rows in view. Rows have a
+// fixed height and are recycled: createRow() builds one, bindRow() fills it for an index.
+// The content box is sized to the full list, and a spacer at the top pushes the visible
+// rows down to where they belong.
+
+interface VirtualListProps extends Omit<ScrollProps, 'children'> {
+  count?: number;
+  rowHeight?: number;
+  createRow?: () => UIBox;
+  bindRow?: (row: UIBox, index: number) => void;
+}
+
+/** Rebuilds the visible rows right before the normal scroll layout places them. */
+const virtualListLayout: ILayout = {
+  measure(box) {
+    scrollLayout.measure(box);
+  },
+  arrange(box) {
+    const list = box as UIVirtualList;
+    list.syncRows();
+    // The rows may have changed, so measure the content again before it's placed.
+    list.content.layout.measure(list.content);
+    scrollLayout.arrange(box);
+  },
+};
+
+class UIVirtualList extends UIScroll {
+  layout: ILayout = virtualListLayout;
+  count = 0;
+  rowHeight = 28;
+  createRow: () => UIBox = () => new UIBox();
+  bindRow: (row: UIBox, index: number) => void = () => {};
+  /** Index of the first row currently in `content` (after the spacer). */
+  first = 0;
+  private spacer = new UIBox({ interactive: false });
+  /** Rows built so far; the first `shown` are in use. Grows to the most rows ever visible. */
+  private pool: UIBox[] = [];
+
+  constructor(props: VirtualListProps = {}) {
+    super();
+    this.set({ scrollX: false, scrollY: true, ...props });
+  }
+
+  set(props: VirtualListProps): this {
+    return super.set(props);
+  }
+
+  /** Re-binds the visible rows on the next render, e.g. after the data behind them changed. */
+  refresh() {
+    this.invalidate();
+  }
+
+  /** Called during layout, when this box's size is final. Invalidations here don't re-render. */
+  syncRows() {
+    const v = this.viewport();
+    const total = this.count * this.rowHeight;
+    const offset = Math.max(0, Math.min(this.offsetY, total - v.h));
+    this.first = Math.floor(offset / this.rowHeight);
+    const end = Math.min(this.count, Math.ceil((offset + v.h) / this.rowHeight));
+    const shown = Math.max(0, end - this.first);
+
+    while (this.pool.length < shown) this.pool.push(this.createRow());
+    const rows = this.pool.slice(0, shown);
+    rows.forEach((row, i) => {
+      row.set({ height: this.rowHeight });
+      this.bindRow(row, this.first + i);
+    });
+    this.spacer.set({ height: this.first * this.rowHeight });
+    this.content.set({ height: total, children: [this.spacer, ...rows] });
+  }
+}
+
+const virtualList = (props: VirtualListProps = {}) => new UIVirtualList(props);
+
+Object.assign(window, { button, checkbox, scrollBox, virtualList, UICheckbox, UIScroll, UIVirtualList });

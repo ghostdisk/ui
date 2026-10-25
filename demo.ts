@@ -28,7 +28,7 @@ const header = box({
 });
 
 // --- sidebar: vertical scroll box, fixed width, items stretched across
-const folders = ['Inbox', 'Drafts', 'Sent', 'Archive', 'Spam', 'Trash', ...Array.from({ length: 100 },(_, i) => `Folder ${i + 1}`)];
+const folders = ['Inbox', 'Drafts', 'Sent', 'Archive', 'Spam', 'Trash', ...Array.from({ length: 1000 }, (_, i) => `Folder ${i + 1}`)];
 const sidebar = scrollBox({
   width: 180, padding: 8, color: '#252830',
   content: { gap: 6 },
@@ -76,6 +76,35 @@ const nested = box({
   ],
 });
 
+// --- virtual list: 100k rows, only the visible ones exist; click a row to select it
+let selectedRow = -1;
+const rowIndex = new WeakMap<UIBox, number>();
+const bigList: UIVirtualList = virtualList({
+  flex: 1, height: 220, radius: 8, color: '#252830',
+  count: 100_000,
+  rowHeight: 28,
+  createRow: () => {
+    const row = box({
+      padding: [0, 10], gap: 8, crossAlign: Alignment.Center, cursor: 'pointer',
+      children: [box({ width: 10, height: 10, radius: 5 }), label(''), box({ flex: 1 }), label('', { color: '#7f848e' })],
+    });
+    row.on('pointerenter', () => bigList.refresh()).on('pointerleave', () => bigList.refresh());
+    row.on('click', () => {
+      selectedRow = rowIndex.get(row) ?? -1;
+      bigList.refresh();
+    });
+    return row;
+  },
+  bindRow: (row, i) => {
+    rowIndex.set(row, i);
+    const [dot, name, , size] = row.children as [UIBox, UIText, UIBox, UIText];
+    row.set({ color: i === selectedRow ? '#3b82f6' : row.hovered ? '#3e4451' : i % 2 ? '#2a2e36' : null });
+    dot.set({ color: COLORS[i % COLORS.length] });
+    name.set({ text: `Row ${i + 1}` });
+    size.set({ text: `${(i * 7919) % 1000} KB`, color: i === selectedRow ? '#dbe6ff' : '#7f848e' });
+  },
+});
+
 // --- buttons: sized by their label, one forced tall, one grown by flex.
 // OK / Cancel add and remove playground swatches (defined below; only used on click).
 const buttonRow = box({
@@ -121,7 +150,7 @@ const playgroundScroll = scrollBox({ flex: 1, scrollX: true, scrollY: false, chi
 const main = scrollBox({
   flex: 1, scrollX: true,
   content: { padding: 8, gap: 8 },
-  children: [flexRow, alignGrid, box({ children: [nested] }), buttonRow, checkboxRow, playgroundScroll],
+  children: [flexRow, alignGrid, box({ gap: 8, children: [nested, bigList] }), buttonRow, checkboxRow, playgroundScroll],
 });
 styleSwatches();
 
@@ -143,7 +172,8 @@ const surface = new UI.Surface(canvas, root);
 const hud = document.getElementById('hud')!;
 surface.onRender = s => {
   hud.textContent =
-    `renders: ${s.renderCount}  draw calls: ${s.drawCalls}  last click: ${lastClick}  last change: ${lastChange}\n` +
+    `renders: ${s.renderCount}  draw calls: ${s.drawCalls}  boxes painted: ${s.paintedCount}/${s.boxCount}  list rows: ${bigList.first + 1}+  selected: ${selectedRow + 1}\n` +
+    `last click: ${lastClick}  last change: ${lastChange}\n` +
     `playground  dir: ${playground.direction === Direction.Row ? 'Row' : 'Column'}` +
     `  main: ${ALIGN_NAMES[playground.mainAlign]}` +
     `  cross: ${ALIGN_NAMES[playground.crossAlign]}` +
