@@ -28,7 +28,7 @@ const header = box({
 });
 
 // --- sidebar: vertical scroll box, fixed width, items stretched across
-const folders = ['Inbox', 'Drafts', 'Sent', 'Archive', 'Spam', 'Trash', ...Array.from({ length: 30 }, (_, i) => `Folder ${i + 1}`)];
+const folders = ['Inbox', 'Drafts', 'Sent', 'Archive', 'Spam', 'Trash', ...Array.from({ length: 100 },(_, i) => `Folder ${i + 1}`)];
 const sidebar = scrollBox({
   width: 180, padding: 8, color: '#252830',
   content: { gap: 6 },
