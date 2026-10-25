@@ -41,16 +41,23 @@ const flexRow = box({
   children: [1, 2, 3].map((f, i) => box({ flex: f, color: COLORS[i] })),
 });
 
-// --- the four main-axis alignments side by side
+// --- grid of flex rows: columns vary mainAlign, rows vary crossAlign
+const ALIGNMENTS = [Alignment.Start, Alignment.Center, Alignment.End, Alignment.Stretch];
 const threeSwatches = () => [swatch(24, 24, COLORS[0]), swatch(40, 16, COLORS[1]), swatch(16, 40, COLORS[2])];
-const alignRow = box({
-  gap: 8, crossAlign: Alignment.Stretch,
-  children: [Alignment.Start, Alignment.Center, Alignment.End, Alignment.Stretch].map(a =>
-    box({
-      flex: 1, height: 56, padding: 4, gap: 4,
-      mainAlign: a, crossAlign: Alignment.Center, color: '#2c313a',
-      children: threeSwatches(),
-    })),
+const centered = (child: UIBox) => box({ mainAlign: Alignment.Center, crossAlign: Alignment.Center, children: [child] });
+const alignGrid = box({
+  layout: UI.layouts.grid, columns: 5, gap: 4,
+  children: [
+    centered(label('cross \\ main', { color: '#7f848e' })),
+    ...ALIGNMENTS.map(a => centered(label(ALIGN_NAMES[a], { color: '#abb2bf' }))),
+    ...ALIGNMENTS.flatMap(cross => [
+      centered(label(ALIGN_NAMES[cross], { color: '#abb2bf' })),
+      ...ALIGNMENTS.map(main => box({
+        height: 64, padding: 4, gap: 4, mainAlign: main, crossAlign: cross, color: '#2c313a',
+        children: threeSwatches(),
+      })),
+    ]),
+  ],
 });
 
 // --- min size bubbling up: no sizes set on the containers, only on leaves
@@ -92,7 +99,7 @@ const playground = box({
 
 const main = box({
   flex: 1, direction: Direction.Column, padding: 8, gap: 8, crossAlign: Alignment.Stretch,
-  children: [flexRow, alignRow, box({ children: [nested] }), buttonRow, playground],
+  children: [flexRow, alignGrid, box({ children: [nested] }), buttonRow, playground],
 });
 
 const root = box({

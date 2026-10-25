@@ -26,6 +26,10 @@ interface BoxProps {
   /** Share of the parent's free main-axis space. 0 = don't grow. */
   flex?: number;
   gap?: number;
+  /** Grid layout: column count; children fill row by row. */
+  columns?: number;
+  /** Grid layout: minimum row count (more are added as children need them). */
+  rows?: number;
   padding?: Padding;
   /** Fixed minimum size; content can still make the box larger. */
   width?: number | null;
@@ -146,6 +150,8 @@ class UIBox {
   alignSelf: Alignment | null = null;
   flex = 0;
   gap = 0;
+  columns = 1;
+  rows = 0;
   padding: Padding = 0;
   width: number | null = null;
   height: number | null = null;
@@ -243,6 +249,14 @@ class UIBox {
   }
 }
 
+/** min size = content + padding, but never below the fixed size or the bg's corners. */
+function setMinSize(box: UIBox, contentW: number, contentH: number) {
+  const p = paddingOf(box);
+  const bg = box.bg;
+  box.minW = Math.max(box.width ?? 0, bg ? bg.left + bg.right : 0, contentW + p.l + p.r);
+  box.minH = Math.max(box.height ?? 0, bg ? bg.top + bg.bottom : 0, contentH + p.t + p.b);
+}
+
 const flex: ILayout = {
   measure(box) {
     const row = box.direction === Direction.Row;
@@ -254,10 +268,7 @@ const flex: ILayout = {
       cross = Math.max(cross, row ? c.minH : c.minW);
     }
     main += box.gap * Math.max(0, box.children.length - 1);
-    const p = paddingOf(box);
-    const bg = box.bg;
-    box.minW = Math.max(box.width ?? 0, bg ? bg.left + bg.right : 0, (row ? main : cross) + p.l + p.r);
-    box.minH = Math.max(box.height ?? 0, bg ? bg.top + bg.bottom : 0, (row ? cross : main) + p.t + p.b);
+    setMinSize(box, row ? main : cross, row ? cross : main);
   },
 
   arrange(box) {
@@ -299,6 +310,65 @@ const flex: ILayout = {
       }
       c.layout.arrange(c);
       pos += sizes[i] + box.gap;
+    });
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Grid: `columns` columns, children placed row by row. Each column is as wide as its
+// widest child and each row as tall as its tallest; leftover space is split equally
+// between the tracks. Children fill their cell. `gap` applies in both directions.
+
+/** Track sizes from the children's (already measured) min sizes. */
+function gridTracks(box: UIBox) {
+  const cols = Math.max(1, Math.floor(box.columns));
+  const rows = Math.max(box.rows, Math.ceil(box.children.length / cols));
+  const colW = new Array<number>(cols).fill(0);
+  const rowH = new Array<number>(rows).fill(0);
+  box.children.forEach((c, i) => {
+    const col = i % cols;
+    const row = Math.floor(i / cols);
+    colW[col] = Math.max(colW[col], c.minW);
+    rowH[row] = Math.max(rowH[row], c.minH);
+  });
+  return { cols, rows, colW, rowH };
+}
+
+const sum = (xs: number[]) => xs.reduce((a, b) => a + b, 0);
+
+/** Grows the tracks equally to fill `size`, then returns each track's start offset. */
+function spreadTracks(tracks: number[], size: number, gap: number) {
+  const free = size - sum(tracks) - gap * (tracks.length - 1);
+  if (free > 0) tracks.forEach((_, i) => (tracks[i] += free / tracks.length));
+  let pos = 0;
+  return tracks.map(t => {
+    const start = pos;
+    pos += t + gap;
+    return start;
+  });
+}
+
+const grid: ILayout = {
+  measure(box) {
+    for (const c of box.children) c.layout.measure(c);
+    const { cols, rows, colW, rowH } = gridTracks(box);
+    setMinSize(box, sum(colW) + box.gap * (cols - 1), sum(rowH) + box.gap * Math.max(0, rows - 1));
+  },
+
+  arrange(box) {
+    if (!box.children.length) return;
+    const p = paddingOf(box);
+    const { cols, colW, rowH } = gridTracks(box);
+    const xs = spreadTracks(colW, box.w - p.l - p.r, box.gap);
+    const ys = spreadTracks(rowH, box.h - p.t - p.b, box.gap);
+    box.children.forEach((c, i) => {
+      const col = i % cols;
+      const row = Math.floor(i / cols);
+      c.x = box.x + p.l + xs[col];
+      c.y = box.y + p.t + ys[row];
+      c.w = colW[col];
+      c.h = rowH[row];
+      c.layout.arrange(c);
     });
   },
 };
@@ -675,5 +745,5 @@ class Surface {
   }
 }
 
-const UI = { UIBox, UIText, NineSlice, BoxEvent, Surface, Alignment, Direction, atlas, layouts: { flex, text: textLayout } };
+const UI = { UIBox, UIText, NineSlice, BoxEvent, Surface, Alignment, Direction, atlas, layouts: { flex, grid, text: textLayout } };
 Object.assign(window, { UI, UIBox, UIText, NineSlice, BoxEvent, Alignment, Direction });
