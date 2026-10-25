@@ -64,6 +64,9 @@
     <rect x="16.5" y="19.5" width="63" height="42" rx="8.5" fill="none" stroke="#0e2a5c"/>
   </g>
 
+  <!-- check: region (256,16) 16x16, white tick for checkboxes -->
+  <path d="M259.5 24.5 L263 28 L268.5 20.5" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+
   <!-- font: Arial 16, ASCII 32..126 in 20x20 cells, 16 per row from (0,128).
        Cell i = code - 32; pen at cell x + 2, baseline at cell y + 16. White, tinted at draw time.
        Generated; advances live in ui.ts (UI.atlas.font). -->

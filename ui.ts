@@ -38,6 +38,11 @@ interface BoxProps {
   bg?: NineSlice | null;
   /** Solid fill if there is no bg, tint of the bg otherwise. */
   color?: string | null;
+  /** Corner radius of the fill/border (ignored when there is a bg). */
+  radius?: number;
+  /** Border width, drawn inside the box; doesn't affect layout. Needs borderColor. */
+  border?: number;
+  borderColor?: string | null;
   /** false = invisible to hit testing; the pointer hits whatever is underneath. */
   interactive?: boolean;
   /** CSS cursor shown while hovering; the deepest box that sets one wins. */
@@ -55,8 +60,10 @@ interface BoxProps {
 //   pointermove/down/up from the target up to the root (bubbling, stoppable)
 //   click               on up, from the deepest box that got both the down and the up
 // While the primary button is held, move/up go to the box that got the down (capture).
+//
+// Widgets raise their own events (e.g. 'change') with box.dispatch(), which bubbles the same way.
 
-type BoxEventType = 'pointerenter' | 'pointerleave' | 'pointermove' | 'pointerdown' | 'pointerup' | 'click';
+type BoxEventType = 'pointerenter' | 'pointerleave' | 'pointermove' | 'pointerdown' | 'pointerup' | 'click' | 'change';
 type BoxEventHandler = (e: BoxEvent) => void;
 
 class BoxEvent {
@@ -104,6 +111,8 @@ const atlas = {
   button: new NineSlice({ x: 16, y: 16, w: 64, h: 52 }, { left: 12, top: 12, right: 12, bottom: 20 }),
   buttonHover: new NineSlice({ x: 96, y: 16, w: 64, h: 52 }, { left: 12, top: 12, right: 12, bottom: 20 }),
   buttonDown: new NineSlice({ x: 176, y: 16, w: 64, h: 52 }, { left: 12, top: 12, right: 12, bottom: 20 }),
+  /** Plain sprite: zero insets, so it just stretches to the box. */
+  check: new NineSlice({ x: 256, y: 16, w: 16, h: 16 }, { left: 0, top: 0, right: 0, bottom: 0 }),
   font: {
     /** Arial 16, ASCII 32..126; glyph i = code - 32 sits in cell (i % cols, i / cols). */
     x: 0, y: 128, cols: 16, cell: 20,
@@ -158,6 +167,9 @@ class UIBox {
   height: number | null = null;
   bg: NineSlice | null = null;
   color: string | null = null;
+  radius = 0;
+  border = 0;
+  borderColor: string | null = null;
   interactive = true;
   cursor: string | null = null;
   onClick: BoxEventHandler | null = null;
@@ -238,15 +250,31 @@ class UIBox {
 
   /** Emits this box's own quads (children are visited by the Surface). */
   paint(s: Surface) {
-    if (this.bg) s.nineSlice(this.x, this.y, this.w, this.h, this.bg, this.color ? parseColor(this.color) : WHITE);
-    else if (this.color) s.solid(this.x, this.y, this.w, this.h, parseColor(this.color));
+    if (this.bg) {
+      s.nineSlice(this.x, this.y, this.w, this.h, this.bg, this.color ? parseColor(this.color) : WHITE);
+    } else if (this.color || (this.border > 0 && this.borderColor)) {
+      s.rect(
+        this.x, this.y, this.w, this.h,
+        this.color ? parseColor(this.color) : TRANSPARENT,
+        this.radius,
+        this.borderColor ? this.border : 0,
+        this.borderColor ? parseColor(this.borderColor) : TRANSPARENT,
+      );
+    }
   }
 
-  /** Runs this box's handlers only; bubbling is the Surface's job. */
+  /** Runs this box's handlers only (no bubbling). */
   emit(e: BoxEvent) {
     e.current = this;
     for (const fn of this.listeners[e.type] ?? []) fn(e);
     if (e.type === 'click') this.onClick?.(e);
+  }
+
+  /** Raises an event with this box as the target and bubbles it up through the parents. */
+  dispatch(type: BoxEventType, x = 0, y = 0): BoxEvent {
+    const e = new BoxEvent(type, x, y, this);
+    for (let b: UIBox | null = this; b && !e.stopped; b = b.parent) b.emit(e);
+    return e;
   }
 }
 
@@ -442,32 +470,81 @@ class UIText extends UIBox {
 // ---------------------------------------------------------------------------
 // Rendering
 
+// One shader for everything. Every quad samples the atlas and multiplies by its colour.
+// Quads with a non-zero half size are also shaped: a rounded-rect SDF gives the
+// antialiased outline and an inner border band in a second colour.
 const VERT = `#version 300 es
 in vec2 aPos;
 in vec2 aUV;
 in vec4 aColor;
+in vec2 aLocal;
+in vec2 aHalf;
+in vec2 aShape;
+in vec4 aBorderColor;
 uniform vec2 uViewport;
 out vec2 vUV;
 out vec4 vColor;
+out vec2 vLocal;
+out vec2 vHalf;
+out vec2 vShape;
+out vec4 vBorderColor;
 void main() {
   vec2 p = aPos / uViewport * 2.0 - 1.0;
   gl_Position = vec4(p.x, -p.y, 0.0, 1.0);
   vUV = aUV;
   vColor = aColor;
+  vLocal = aLocal;
+  vHalf = aHalf;
+  vShape = aShape;
+  vBorderColor = aBorderColor;
 }`;
 
-// The atlas is uploaded premultiplied, so the tint is premultiplied here too.
+// The atlas is uploaded premultiplied, so colours are premultiplied here too.
 const FRAG = `#version 300 es
-precision mediump float;
+precision highp float;
 uniform sampler2D uAtlas;
 in vec2 vUV;
 in vec4 vColor;
+in vec2 vLocal;        // position relative to the rect centre, CSS px
+in vec2 vHalf;         // rect half size; 0 = not shaped
+in vec2 vShape;        // x = corner radius, y = border width
+in vec4 vBorderColor;
 out vec4 outColor;
-void main() { outColor = texture(uAtlas, vUV) * vec4(vColor.rgb * vColor.a, vColor.a); }`;
 
-const FLOATS_PER_VERTEX = 8; // x, y, u, v, r, g, b, a
+vec4 premul(vec4 c) { return vec4(c.rgb * c.a, c.a); }
+
+// Signed distance to a rounded rect centred at the origin; negative inside.
+float sdRoundRect(vec2 p, vec2 halfSize, float r) {
+  vec2 q = abs(p) - halfSize + r;
+  return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+}
+
+void main() {
+  vec4 c = premul(vColor);
+  if (vHalf.x > 0.0) {
+    float r = min(vShape.x, min(vHalf.x, vHalf.y));
+    float d = sdRoundRect(vLocal, vHalf, r);
+    float aa = max(fwidth(d), 1e-4);
+    float inside = clamp(0.5 - d / aa, 0.0, 1.0);
+    float inFill = clamp(0.5 - (d + vShape.y) / aa, 0.0, 1.0);
+    if (vShape.y > 0.0) c = mix(premul(vBorderColor), c, inFill);
+    c *= inside;
+  }
+  outColor = texture(uAtlas, vUV) * c;
+}`;
+
+// x, y, u, v, color(4), local(2), half(2), radius, border, borderColor(4)
+const FLOATS_PER_VERTEX = 18;
 const FLOATS_PER_QUAD = FLOATS_PER_VERTEX * 6;
 const WHITE = [1, 1, 1, 1];
+const TRANSPARENT = [0, 0, 0, 0];
+
+/** Rounded-rect parameters for a shaped quad. */
+interface Shape {
+  radius: number;
+  border: number;
+  borderColor: number[];
+}
 
 const colorCache = new Map<string, number[]>();
 function parseColor(hex: string): number[] {
@@ -534,6 +611,10 @@ class Surface {
     attrib('aPos', 2, 0);
     attrib('aUV', 2, 2);
     attrib('aColor', 4, 4);
+    attrib('aLocal', 2, 8);
+    attrib('aHalf', 2, 10);
+    attrib('aShape', 2, 12);
+    attrib('aBorderColor', 4, 14);
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
 
@@ -711,6 +792,13 @@ class Surface {
     this.quad(x, y, x + w, y + h, u, v, u, v, color);
   }
 
+  /** Solid rectangle with optional rounded corners and an inner border. */
+  rect(x: number, y: number, w: number, h: number, fill: number[], radius: number, border: number, borderColor: number[]) {
+    if (radius <= 0 && border <= 0) return this.solid(x, y, w, h, fill);
+    const { x: u, y: v } = atlas.white;
+    this.quad(x, y, x + w, y + h, u, v, u, v, fill, { radius, border, borderColor });
+  }
+
   nineSlice(x: number, y: number, w: number, h: number, s: NineSlice, color: number[]) {
     // If the box is smaller than the fixed corners, shrink the corners proportionally.
     const kx = Math.min(1, w / (s.left + s.right || 1));
@@ -727,10 +815,11 @@ class Surface {
     }
   }
 
-  /** Positions in CSS pixels, UVs in atlas pixels. */
+  /** Positions in CSS pixels, UVs in atlas pixels. With a shape, the quad is the rect's bounds. */
   quad(
     x0: number, y0: number, x1: number, y1: number,
     u0: number, v0: number, u1: number, v1: number, [r, g, b, a]: number[],
+    shape: Shape | null = null,
   ) {
     if (this.n + FLOATS_PER_QUAD > this.data.length) {
       const bigger = new Float32Array(this.data.length * 2);
@@ -739,8 +828,17 @@ class Surface {
     }
     const k = 1 / atlas.size;
     u0 *= k; v0 *= k; u1 *= k; v1 *= k;
-    for (const [x, y, u, v] of [[x0, y0, u0, v0], [x1, y0, u1, v0], [x0, y1, u0, v1], [x0, y1, u0, v1], [x1, y0, u1, v0], [x1, y1, u1, v1]]) {
-      this.data.set([x, y, u, v, r, g, b, a], this.n);
+    const hw = shape ? (x1 - x0) / 2 : 0;
+    const hh = shape ? (y1 - y0) / 2 : 0;
+    const radius = shape?.radius ?? 0;
+    const border = shape?.border ?? 0;
+    const [br, bg, bb, ba] = shape?.borderColor ?? TRANSPARENT;
+    const corners = [
+      [x0, y0, u0, v0, -hw, -hh], [x1, y0, u1, v0, hw, -hh], [x0, y1, u0, v1, -hw, hh],
+      [x0, y1, u0, v1, -hw, hh], [x1, y0, u1, v0, hw, -hh], [x1, y1, u1, v1, hw, hh],
+    ];
+    for (const [x, y, u, v, lx, ly] of corners) {
+      this.data.set([x, y, u, v, r, g, b, a, lx, ly, hw, hh, radius, border, br, bg, bb, ba], this.n);
       this.n += FLOATS_PER_VERTEX;
     }
   }
