@@ -96,7 +96,8 @@ class NineSlice {
 
 /** Region table for public/atlas.svg. Coordinates are atlas pixels. */
 const atlas = {
-  url: '/atlas.svg',
+  // Relative to the page, so the build works from a subfolder (e.g. github.io/ui/).
+  url: 'atlas.svg',
   size: 512,
   /** Centre of a solid white block; solid quads sample only this texel. */
   white: { x: 4, y: 4 },
