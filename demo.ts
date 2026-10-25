@@ -1,7 +1,10 @@
-// Demo: builds a box tree once, then mutates it from keyboard input.
+// Demo: builds a box tree once, then mutates it from keyboard and pointer input.
 // Nothing renders unless something calls set()/add()/remove() or the canvas resizes.
 
 export {};
+
+let lastClick = '-';
+const logClick = (e: BoxEvent) => (lastClick = e.target.text ?? '?');
 
 const box = (props: BoxProps = {}) => new UIBox(props);
 const square = (size: number, color: string) => box({ width: size, height: size, color });
@@ -16,7 +19,7 @@ const header = box({
   children: [
     square(32, '#61afef'),
     box({ flex: 1 }),
-    square(24, '#3e4451'), square(24, '#3e4451'), square(24, '#3e4451'),
+    ...['File', 'Edit', 'Help'].map(text => button({ text, onClick: logClick })),
   ],
 });
 
@@ -60,6 +63,21 @@ const nested = box({
   ],
 });
 
+// --- buttons: sized by their (not yet drawn) text, one forced tall, one grown by flex.
+// OK / Cancel add and remove playground swatches (defined below; only used on click).
+const buttonRow = box({
+  gap: 8, crossAlign: Alignment.End,
+  children: [
+    button({ text: 'OK', onClick: () => playground.add(swatch(24 + Math.random() * 40, 24 + Math.random() * 40, COLORS[playground.children.length % COLORS.length])) }),
+    button({ text: 'Cancel', onClick: () => { const k = playground.children.at(-1); if (k) playground.remove(k); } }),
+    button({ text: 'A much longer label' }),
+    button({ text: 'Tall', height: 72 }),
+    button({ text: 'Flex', flex: 1 }),
+  ],
+});
+// Clicks bubble: one listener on the row sees every button in it.
+buttonRow.on('click', logClick);
+
 // --- keyboard-driven playground
 const growMe = swatch(48, 48, COLORS[4]);
 const playground = box({
@@ -69,7 +87,7 @@ const playground = box({
 
 const main = box({
   flex: 1, direction: Direction.Column, padding: 8, gap: 8, crossAlign: Alignment.Stretch,
-  children: [flexRow, alignRow, box({ children: [nested] }), playground],
+  children: [flexRow, alignRow, box({ children: [nested] }), buttonRow, playground],
 });
 
 const root = box({
@@ -87,7 +105,7 @@ const surface = new UI.Surface(canvas, root);
 const hud = document.getElementById('hud')!;
 surface.onRender = s => {
   hud.textContent =
-    `renders: ${s.renderCount}\n` +
+    `renders: ${s.renderCount}  last click: ${lastClick}\n` +
     `playground  dir: ${playground.direction === Direction.Row ? 'Row' : 'Column'}` +
     `  main: ${ALIGN_NAMES[playground.mainAlign]}` +
     `  cross: ${ALIGN_NAMES[playground.crossAlign]}` +
