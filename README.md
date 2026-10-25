@@ -4,17 +4,8 @@ A small retained-mode UI library on WebGL2, written as a demo of a two-pass layo
 Live demo: https://ghostdisk.github.io/ui/
 
 ```
-npm install
-npm run dev     # dev server
-npm run build   # static build in dist/, works from any subfolder
+npm i && npm run dev
 ```
-
-## Files
-
-- `ui.ts` – core: `UIBox`, layouts (flex, grid, text), events, the WebGL renderer (`Surface`).
-- `widgets.ts` – widgets built on the core: `button`, `checkbox`, `scrollBox`, `virtualList`.
-- `demo.ts` – the demo page.
-- `public/atlas.svg` – one 512×512 texture: button skins, the checkmark, Arial 16 glyphs.
 
 ## How it's built
 
