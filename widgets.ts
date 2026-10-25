@@ -92,4 +92,225 @@ class UICheckbox extends UIBox {
 
 const checkbox = (props: CheckboxProps = {}) => new UICheckbox(props);
 
-Object.assign(window, { button, checkbox, UICheckbox });
+// ---------------------------------------------------------------------------
+// Scroll box. All scrolling lives here: UIScroll wraps an inner `content` box, sizes and
+// offsets it with its own layout, clips it via childClip(), and draws and drives its own
+// scrollbars. The core only knows about clipping, paintOver() and wheel events.
+
+interface ScrollProps extends BoxProps {
+  scrollX?: boolean;
+  scrollY?: boolean;
+  /** Props for the inner content box (default: column with stretched children). */
+  content?: BoxProps;
+}
+
+const SCROLLBAR_SIZE = 10;
+const SCROLLBAR_MIN_THUMB = 24;
+
+type Axis = 'x' | 'y';
+
+/**
+ * Measure: along a scrolled axis the content can be any size, so it doesn't push up the
+ * scroll box's min size. Arrange: the content gets at least the viewport's size (more if it
+ * needs it) and is shifted by the scroll offset.
+ */
+const scrollLayout: ILayout = {
+  measure(box) {
+    const s = box as UIScroll;
+    const c = s.content;
+    c.layout.measure(c);
+    UI.setMinSize(s, (s.scrollX ? 0 : c.minW) + s.gutterW, (s.scrollY ? 0 : c.minH) + s.gutterH);
+  },
+
+  arrange(box) {
+    const s = box as UIScroll;
+    const c = s.content;
+    const v = s.viewport();
+    c.w = s.scrollX ? Math.max(v.w, c.minW) : v.w;
+    c.h = s.scrollY ? Math.max(v.h, c.minH) : v.h;
+    // Content may have shrunk since the offset was set.
+    s.offsetX = Math.min(s.offsetX, s.maxScroll('x'));
+    s.offsetY = Math.min(s.offsetY, s.maxScroll('y'));
+    c.x = v.x - s.offsetX;
+    c.y = v.y - s.offsetY;
+    c.layout.arrange(c);
+  },
+};
+
+class UIScroll extends UIBox {
+  layout: ILayout = scrollLayout;
+  scrollX = false;
+  scrollY = true;
+  /** Current scroll position in CSS px; change it with scrollTo/scrollBy. */
+  offsetX = 0;
+  offsetY = 0;
+  /** Holds the scrolled children; add() and remove() go here. */
+  readonly content = new UIBox({ direction: Direction.Column, crossAlign: Alignment.Stretch });
+  private drag: { axis: Axis; grab: number } | null = null;
+  private hoverBar: Axis | null = null;
+
+  constructor(props: ScrollProps = {}) {
+    // Field initializers run after super(), so wire up the content once it exists.
+    super();
+    this.content.parent = this;
+    this.children = [this.content];
+    this.set(props);
+
+    this.on('wheel', e => {
+      let dx = this.scrollX ? e.dx : 0;
+      const dy = this.scrollY ? e.dy : 0;
+      // A plain wheel scrolls a horizontal-only box sideways.
+      if (this.scrollX && !this.scrollY && dx === 0) dx = e.dy;
+      // Consume the wheel only if we actually moved, so outer scroll boxes take over at the ends.
+      if (this.scrollBy(dx, dy)) e.stopPropagation();
+    });
+    this.on('pointerdown', e => {
+      const axis = this.barAt(e.x, e.y);
+      const bar = axis && this.bar(axis);
+      if (!axis || !bar) return;
+      const p = axis === 'x' ? e.x : e.y;
+      if (p < bar.thumbStart || p >= bar.thumbStart + bar.thumbLen) {
+        // Clicked the track: jump so the thumb is centred under the pointer, then drag it.
+        this.setOffset(axis, ((p - bar.trackStart - bar.thumbLen / 2) / bar.travel) * bar.max);
+        this.drag = { axis, grab: bar.thumbLen / 2 };
+      } else {
+        this.drag = { axis, grab: p - bar.thumbStart };
+      }
+      this.invalidate();
+      e.stopPropagation();
+    });
+    this.on('pointermove', e => {
+      if (this.drag) {
+        const { axis, grab } = this.drag;
+        const bar = this.bar(axis);
+        if (bar) this.setOffset(axis, ((axis === 'x' ? e.x : e.y) - grab - bar.trackStart) / bar.travel * bar.max);
+      } else {
+        this.setHoverBar(this.barAt(e.x, e.y));
+      }
+    });
+    this.on('pointerup', () => {
+      if (!this.drag) return;
+      this.drag = null;
+      this.invalidate();
+    });
+    this.on('pointerleave', () => this.setHoverBar(null));
+  }
+
+  set(props: ScrollProps): this {
+    const { children, content, ...rest } = props;
+    super.set(rest);
+    if (content || children) this.content.set({ ...content, ...(children && { children }) });
+    return this;
+  }
+
+  add(...kids: UIBox[]): this {
+    this.content.add(...kids);
+    return this;
+  }
+
+  remove(kid: UIBox): this {
+    this.content.remove(kid);
+    return this;
+  }
+
+  /** Width taken by the vertical scrollbar. */
+  get gutterW() {
+    return this.scrollY ? SCROLLBAR_SIZE : 0;
+  }
+
+  /** Height taken by the horizontal scrollbar. */
+  get gutterH() {
+    return this.scrollX ? SCROLLBAR_SIZE : 0;
+  }
+
+  /** Where the content is laid out: inside the padding, minus the scrollbar gutters. */
+  viewport(): Rect {
+    const p = UI.paddingOf(this);
+    return {
+      x: this.x + p.l,
+      y: this.y + p.t,
+      w: Math.max(0, this.w - p.l - p.r - this.gutterW),
+      h: Math.max(0, this.h - p.t - p.b - this.gutterH),
+    };
+  }
+
+  /** Content shows through the padding but not over the scrollbars. */
+  childClip(): Rect {
+    return { x: this.x, y: this.y, w: Math.max(0, this.w - this.gutterW), h: Math.max(0, this.h - this.gutterH) };
+  }
+
+  maxScroll(axis: Axis) {
+    const v = this.viewport();
+    return Math.max(0, axis === 'x' ? this.content.w - v.w : this.content.h - v.h);
+  }
+
+  scrollTo(x: number, y: number) {
+    const movedX = this.setOffset('x', x);
+    const movedY = this.setOffset('y', y);
+    return movedX || movedY;
+  }
+
+  scrollBy(dx: number, dy: number) {
+    return this.scrollTo(this.offsetX + dx, this.offsetY + dy);
+  }
+
+  /** Clamps and rounds (whole pixels keep text sharp); returns whether it changed. */
+  private setOffset(axis: Axis, v: number) {
+    v = Math.round(Math.max(0, Math.min(v, this.maxScroll(axis))));
+    if (v === (axis === 'x' ? this.offsetX : this.offsetY)) return false;
+    if (axis === 'x') this.offsetX = v;
+    else this.offsetY = v;
+    this.invalidate();
+    return true;
+  }
+
+  /** Scrollbar geometry along one axis, or null if that axis has nothing to scroll. */
+  private bar(axis: Axis) {
+    const enabled = axis === 'x' ? this.scrollX : this.scrollY;
+    const max = this.maxScroll(axis);
+    if (!enabled || max <= 0) return null;
+    const track: Rect = axis === 'y'
+      ? { x: this.x + this.w - SCROLLBAR_SIZE, y: this.y, w: SCROLLBAR_SIZE, h: this.h - this.gutterH }
+      : { x: this.x, y: this.y + this.h - SCROLLBAR_SIZE, w: this.w - this.gutterW, h: SCROLLBAR_SIZE };
+    const trackStart = axis === 'y' ? track.y : track.x;
+    const trackLen = axis === 'y' ? track.h : track.w;
+    const viewLen = axis === 'y' ? this.viewport().h : this.viewport().w;
+    const thumbLen = Math.min(trackLen, Math.max(SCROLLBAR_MIN_THUMB, trackLen * viewLen / (viewLen + max)));
+    const travel = Math.max(1, trackLen - thumbLen);
+    const offset = axis === 'y' ? this.offsetY : this.offsetX;
+    return { track, trackStart, thumbStart: trackStart + travel * offset / max, thumbLen, travel, max };
+  }
+
+  private barAt(x: number, y: number): Axis | null {
+    for (const axis of ['y', 'x'] as const) {
+      const t = this.bar(axis)?.track;
+      if (t && x >= t.x && y >= t.y && x < t.x + t.w && y < t.y + t.h) return axis;
+    }
+    return null;
+  }
+
+  private setHoverBar(axis: Axis | null) {
+    if (axis === this.hoverBar) return;
+    this.hoverBar = axis;
+    this.invalidate();
+  }
+
+  paintOver(s: Surface) {
+    for (const axis of ['y', 'x'] as const) {
+      const bar = this.bar(axis);
+      if (!bar) continue;
+      const active = this.drag?.axis === axis || this.hoverBar === axis;
+      const color = UI.parseColor(active ? '#9da5b4' : '#5c6370');
+      // 2px inset inside the gutter, rounded into a pill.
+      const [x, y, w, h] = axis === 'y'
+        ? [bar.track.x + 2, bar.thumbStart + 2, bar.track.w - 4, bar.thumbLen - 4]
+        : [bar.thumbStart + 2, bar.track.y + 2, bar.thumbLen - 4, bar.track.h - 4];
+      s.rect(x, y, w, h, color, 3, 0, UI.TRANSPARENT);
+    }
+  }
+}
+
+// Not `scroll`: that's already window.scroll().
+const scrollBox = (props: ScrollProps = {}) => new UIScroll(props);
+
+Object.assign(window, { button, checkbox, scrollBox, UICheckbox, UIScroll });

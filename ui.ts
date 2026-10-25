@@ -43,6 +43,8 @@ interface BoxProps {
   /** Border width, drawn inside the box; doesn't affect layout. Needs borderColor. */
   border?: number;
   borderColor?: string | null;
+  /** Clip children (drawing and hit testing) to this box's bounds. */
+  clip?: boolean;
   /** false = invisible to hit testing; the pointer hits whatever is underneath. */
   interactive?: boolean;
   /** CSS cursor shown while hovering; the deepest box that sets one wins. */
@@ -59,17 +61,25 @@ interface BoxProps {
 //   pointerenter/leave  to each box the pointer entered/left (no bubbling)
 //   pointermove/down/up from the target up to the root (bubbling, stoppable)
 //   click               on up, from the deepest box that got both the down and the up
+//   wheel               from the target up to the root, with dx/dy in CSS px
 // While the primary button is held, move/up go to the box that got the down (capture).
 //
 // Widgets raise their own events (e.g. 'change') with box.dispatch(), which bubbles the same way.
 
-type BoxEventType = 'pointerenter' | 'pointerleave' | 'pointermove' | 'pointerdown' | 'pointerup' | 'click' | 'change';
+type BoxEventType =
+  | 'pointerenter' | 'pointerleave' | 'pointermove' | 'pointerdown' | 'pointerup'
+  | 'click' | 'wheel' | 'change';
 type BoxEventHandler = (e: BoxEvent) => void;
+
+interface Rect { x: number; y: number; w: number; h: number }
 
 class BoxEvent {
   /** The box currently handling the event (changes while bubbling). */
   current: UIBox;
   stopped = false;
+  /** Wheel delta in CSS px (positive = scroll right/down). */
+  dx = 0;
+  dy = 0;
 
   constructor(
     public type: BoxEventType,
@@ -170,6 +180,7 @@ class UIBox {
   radius = 0;
   border = 0;
   borderColor: string | null = null;
+  clip = false;
   interactive = true;
   cursor: string | null = null;
   onClick: BoxEventHandler | null = null;
@@ -247,6 +258,14 @@ class UIBox {
     if (i >= 0) list!.splice(i, 1);
     return this;
   }
+
+  /** Area children are clipped to (drawing and hit testing), or null for no clipping. */
+  childClip(): Rect | null {
+    return this.clip ? { x: this.x, y: this.y, w: this.w, h: this.h } : null;
+  }
+
+  /** Drawn after the children, outside this box's childClip (e.g. scrollbars). */
+  paintOver(_s: Surface) {}
 
   /** Emits this box's own quads (children are visited by the Surface). */
   paint(s: Surface) {
@@ -574,6 +593,12 @@ function compileProgram(gl: WebGL2RenderingContext, vs: string, fs: string) {
   return prog;
 }
 
+function intersectRect(a: Rect, b: Rect): Rect {
+  const x = Math.max(a.x, b.x);
+  const y = Math.max(a.y, b.y);
+  return { x, y, w: Math.max(0, Math.min(a.x + a.w, b.x + b.w) - x), h: Math.max(0, Math.min(a.y + a.h, b.y + b.h) - y) };
+}
+
 /** Owns a canvas and a root box. Re-lays-out and redraws when something invalidates. */
 class Surface {
   gl: WebGL2RenderingContext;
@@ -643,22 +668,29 @@ class Surface {
     canvas.addEventListener('pointerleave', e => {
       if (!this.pressPath.length) this.updateHover([], ...this.toLocal(e));
     });
+    canvas.addEventListener('wheel', e => this.onWheel(e), { passive: false });
   }
 
   // --- input
 
-  private toLocal(e: PointerEvent): [number, number] {
+  private toLocal(e: MouseEvent): [number, number] {
     const r = this.canvas.getBoundingClientRect();
     return [e.clientX - r.left, e.clientY - r.top];
   }
 
-  /** Walks down from the root, taking the topmost (last) interactive child under the point at each level. */
+  /**
+   * Walks down from the root, taking the topmost (last) interactive child under the point
+   * at each level. Stops at a box whose childClip doesn't contain the point.
+   */
   hitTest(x: number, y: number): UIBox[] {
-    const inside = (b: UIBox) => b.interactive && x >= b.x && y >= b.y && x < b.x + b.w && y < b.y + b.h;
+    const inRect = (r: Rect) => x >= r.x && y >= r.y && x < r.x + r.w && y < r.y + r.h;
+    const inside = (b: UIBox) => b.interactive && inRect(b);
     const path: UIBox[] = [];
     let b: UIBox | null = inside(this.root) ? this.root : null;
     while (b) {
       path.push(b);
+      const clip = b.childClip();
+      if (clip && !inRect(clip)) break;
       const kids: UIBox[] = b.children;
       b = null;
       for (let i = kids.length - 1; i >= 0; i--) {
@@ -669,10 +701,17 @@ class Surface {
   }
 
   /** Dispatches from the end of the path towards the root until stopped. */
-  private bubble(path: UIBox[], type: BoxEventType, x: number, y: number) {
+  private bubble(path: UIBox[], type: BoxEventType, x: number, y: number, init?: Partial<BoxEvent>) {
     if (!path.length) return;
-    const e = new BoxEvent(type, x, y, path[path.length - 1]);
+    const e = Object.assign(new BoxEvent(type, x, y, path[path.length - 1]), init);
     for (let i = path.length - 1; i >= 0 && !e.stopped; i--) path[i].emit(e);
+  }
+
+  private onWheel(e: WheelEvent) {
+    e.preventDefault();
+    const [x, y] = this.toLocal(e);
+    const k = e.deltaMode === WheelEvent.DOM_DELTA_LINE ? 16 : e.deltaMode === WheelEvent.DOM_DELTA_PAGE ? this.canvas.clientHeight : 1;
+    this.bubble(this.hitTest(x, y), 'wheel', x, y, { dx: e.deltaX * k, dy: e.deltaY * k });
   }
 
   private updateHover(path: UIBox[], x: number, y: number) {
@@ -760,12 +799,18 @@ class Surface {
     root.layout.arrange(root);
 
     this.n = 0;
+    this.batches = [{ start: 0, clip: null }];
+    this.clips = [];
     const visit = (b: UIBox) => {
       b.paint(this);
+      const clip = b.childClip();
+      if (clip) this.pushClip(clip);
       for (const c of b.children) visit(c);
+      if (clip) this.popClip();
+      b.paintOver(this);
     };
     visit(root);
-    const n = this.n;
+    const vertexCount = this.n / FLOATS_PER_VERTEX;
 
     gl.viewport(0, 0, pxW, pxH);
     gl.clearColor(0, 0, 0, 1);
@@ -774,8 +819,27 @@ class Surface {
     gl.uniform2f(this.uViewport, cssW, cssH);
     gl.bindTexture(gl.TEXTURE_2D, this.texture);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.vbo);
-    gl.bufferData(gl.ARRAY_BUFFER, this.data.subarray(0, n), gl.DYNAMIC_DRAW);
-    gl.drawArrays(gl.TRIANGLES, 0, n / FLOATS_PER_VERTEX);
+    gl.bufferData(gl.ARRAY_BUFFER, this.data.subarray(0, this.n), gl.DYNAMIC_DRAW);
+
+    // One draw call per run of quads that share a clip rect.
+    this.drawCalls = 0;
+    this.batches.forEach((batch, i) => {
+      const end = i + 1 < this.batches.length ? this.batches[i + 1].start : vertexCount;
+      if (end <= batch.start) return;
+      if (batch.clip) {
+        // Scissor is in device pixels with y up.
+        const c = batch.clip;
+        const x0 = Math.round(c.x * dpr), x1 = Math.round((c.x + c.w) * dpr);
+        const y0 = Math.round(c.y * dpr), y1 = Math.round((c.y + c.h) * dpr);
+        gl.enable(gl.SCISSOR_TEST);
+        gl.scissor(x0, pxH - y1, Math.max(0, x1 - x0), Math.max(0, y1 - y0));
+      } else {
+        gl.disable(gl.SCISSOR_TEST);
+      }
+      gl.drawArrays(gl.TRIANGLES, batch.start, end - batch.start);
+      this.drawCalls++;
+    });
+    gl.disable(gl.SCISSOR_TEST);
 
     this.renderCount++;
     this.onRender?.(this);
@@ -785,6 +849,30 @@ class Surface {
 
   /** Floats written to `data` so far this frame. */
   private n = 0;
+  /** Runs of vertices drawn with one scissor rect each; a new run starts whenever the clip changes. */
+  private batches: { start: number; clip: Rect | null }[] = [];
+  /** Clip stack; each entry is already intersected with the ones below it. */
+  private clips: Rect[] = [];
+  drawCalls = 0;
+
+  pushClip(r: Rect) {
+    const top = this.clips[this.clips.length - 1];
+    const c = top ? intersectRect(top, r) : r;
+    this.clips.push(c);
+    this.startBatch(c);
+  }
+
+  popClip() {
+    this.clips.pop();
+    this.startBatch(this.clips[this.clips.length - 1] ?? null);
+  }
+
+  private startBatch(clip: Rect | null) {
+    const start = this.n / FLOATS_PER_VERTEX;
+    const last = this.batches[this.batches.length - 1];
+    if (last.start === start) last.clip = clip;
+    else this.batches.push({ start, clip });
+  }
 
   /** Solid rectangle, sampled from the atlas's white block. */
   solid(x: number, y: number, w: number, h: number, color: number[]) {
@@ -844,5 +932,13 @@ class Surface {
   }
 }
 
-const UI = { UIBox, UIText, NineSlice, BoxEvent, Surface, Alignment, Direction, atlas, layouts: { flex, grid, text: textLayout } };
+// At runtime this file is a module, so other files only see what's exported here. TypeScript
+// treats every top-level name as global, so it won't catch a missing export: call helpers
+// through `UI.` from other files.
+const UI = {
+  UIBox, UIText, NineSlice, BoxEvent, Surface, Alignment, Direction, atlas,
+  layouts: { flex, grid, text: textLayout },
+  // Helpers for widgets that implement their own layout/painting.
+  setMinSize, paddingOf, parseColor, TRANSPARENT,
+};
 Object.assign(window, { UI, UIBox, UIText, NineSlice, BoxEvent, Alignment, Direction });

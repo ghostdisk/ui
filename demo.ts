@@ -27,11 +27,12 @@ const header = box({
   ],
 });
 
-// --- sidebar: fixed width, items stretched across
-const sidebar = box({
-  direction: Direction.Column, width: 180, padding: 8, gap: 6,
-  crossAlign: Alignment.Stretch, color: '#252830',
-  children: ['Inbox', 'Drafts', 'Sent', 'Archive', 'Spam', 'Trash'].map(t =>
+// --- sidebar: vertical scroll box, fixed width, items stretched across
+const folders = ['Inbox', 'Drafts', 'Sent', 'Archive', 'Spam', 'Trash', ...Array.from({ length: 30 }, (_, i) => `Folder ${i + 1}`)];
+const sidebar = scrollBox({
+  width: 180, padding: 8, color: '#252830',
+  content: { gap: 6 },
+  children: folders.map(t =>
     box({ height: 28, padding: [0, 8], radius: 4, crossAlign: Alignment.Center, color: '#3e4451', children: [label(t, { color: '#abb2bf' })] })),
 });
 
@@ -113,9 +114,14 @@ const playground = box({
   children: [swatch(48, 32, COLORS[0]), swatch(80, 64, COLORS[1]), growMe, swatch(32, 96, COLORS[2])],
 });
 
-const main = box({
-  flex: 1, direction: Direction.Column, padding: 8, gap: 8, crossAlign: Alignment.Stretch,
-  children: [flexRow, alignGrid, box({ children: [nested] }), buttonRow, checkboxRow, playground],
+// Horizontal-only: OK keeps adding swatches until it scrolls sideways.
+const playgroundScroll = scrollBox({ flex: 1, scrollX: true, scrollY: false, children: [playground] });
+
+// --- main column: scrolls both ways when the window is too small; the scroll boxes nest
+const main = scrollBox({
+  flex: 1, scrollX: true,
+  content: { padding: 8, gap: 8 },
+  children: [flexRow, alignGrid, box({ children: [nested] }), buttonRow, checkboxRow, playgroundScroll],
 });
 styleSwatches();
 
@@ -123,7 +129,7 @@ const root = box({
   direction: Direction.Column, crossAlign: Alignment.Stretch, color: '#1e2127',
   children: [
     header,
-    box({ flex: 1, padding: 8, gap: 8, crossAlign: Alignment.Stretch, children: [sidebar, main] }),
+    box({ flex: 1, padding: [8, 0, 0, 8], gap: 8, crossAlign: Alignment.Stretch, children: [sidebar, main] }),
     box({
       height: 24, padding: [0, 8], crossAlign: Alignment.Center, color: '#2c313a',
       children: [label('The quick brown fox jumps over the lazy dog. 0123456789 !"#$%&\'()*+,-./:;<=>?@[\\]^_`{|}~', { color: '#7f848e' })],
@@ -137,7 +143,7 @@ const surface = new UI.Surface(canvas, root);
 const hud = document.getElementById('hud')!;
 surface.onRender = s => {
   hud.textContent =
-    `renders: ${s.renderCount}  last click: ${lastClick}  last change: ${lastChange}\n` +
+    `renders: ${s.renderCount}  draw calls: ${s.drawCalls}  last click: ${lastClick}  last change: ${lastChange}\n` +
     `playground  dir: ${playground.direction === Direction.Row ? 'Row' : 'Column'}` +
     `  main: ${ALIGN_NAMES[playground.mainAlign]}` +
     `  cross: ${ALIGN_NAMES[playground.crossAlign]}` +
