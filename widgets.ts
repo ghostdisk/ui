@@ -16,7 +16,7 @@ function button({ text, ...props }: ButtonProps) {
     mainAlign: Alignment.Center,
     crossAlign: Alignment.Center,
     cursor: 'pointer',
-    text,
+    children: [new UIText({ text, shadow: '#0e2a5c' })],
     ...props,
   });
   // Stays down from pointerdown until pointerup, even if the pointer leaves the button.

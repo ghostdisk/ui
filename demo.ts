@@ -4,10 +4,13 @@
 export {};
 
 let lastClick = '-';
-const logClick = (e: BoxEvent) => (lastClick = e.target.text ?? '?');
+// Labels are non-interactive, so the target is the button itself; read its label child.
+const labelOf = (b: UIBox) => b.children.find(c => c instanceof UIText)?.text ?? '?';
+const logClick = (e: BoxEvent) => (lastClick = labelOf(e.target));
 
 const box = (props: BoxProps = {}) => new UIBox(props);
 const square = (size: number, color: string) => box({ width: size, height: size, color });
+const label = (text: string, props: TextProps = {}) => new UIText({ text, ...props });
 const swatch = (w: number, h: number, color: string) => box({ width: w, height: h, color });
 
 const ALIGN_NAMES = ['Start', 'Center', 'End', 'Stretch'];
@@ -18,6 +21,7 @@ const header = box({
   height: 48, padding: 8, gap: 8, crossAlign: Alignment.Center, color: '#2c313a',
   children: [
     square(32, '#61afef'),
+    label('Tiny UI'),
     box({ flex: 1 }),
     ...['File', 'Edit', 'Help'].map(text => button({ text, onClick: logClick })),
   ],
@@ -27,7 +31,8 @@ const header = box({
 const sidebar = box({
   direction: Direction.Column, width: 180, padding: 8, gap: 6,
   crossAlign: Alignment.Stretch, color: '#252830',
-  children: COLORS.map(() => box({ height: 28, color: '#3e4451' })),
+  children: ['Inbox', 'Drafts', 'Sent', 'Archive', 'Spam', 'Trash'].map(t =>
+    box({ height: 28, padding: [0, 8], crossAlign: Alignment.Center, color: '#3e4451', children: [label(t, { color: '#abb2bf' })] })),
 });
 
 // --- flex ratios 1:2:3
@@ -63,7 +68,7 @@ const nested = box({
   ],
 });
 
-// --- buttons: sized by their (not yet drawn) text, one forced tall, one grown by flex.
+// --- buttons: sized by their label, one forced tall, one grown by flex.
 // OK / Cancel add and remove playground swatches (defined below; only used on click).
 const buttonRow = box({
   gap: 8, crossAlign: Alignment.End,
@@ -95,7 +100,10 @@ const root = box({
   children: [
     header,
     box({ flex: 1, padding: 8, gap: 8, crossAlign: Alignment.Stretch, children: [sidebar, main] }),
-    box({ height: 24, color: '#2c313a' }),
+    box({
+      height: 24, padding: [0, 8], crossAlign: Alignment.Center, color: '#2c313a',
+      children: [label('The quick brown fox jumps over the lazy dog. 0123456789 !"#$%&\'()*+,-./:;<=>?@[\\]^_`{|}~', { color: '#7f848e' })],
+    }),
   ],
 });
 

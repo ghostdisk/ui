@@ -34,8 +34,8 @@ interface BoxProps {
   bg?: NineSlice | null;
   /** Solid fill if there is no bg, tint of the bg otherwise. */
   color?: string | null;
-  /** Not drawn yet; only contributes to the box's min size. */
-  text?: string | null;
+  /** false = invisible to hit testing; the pointer hits whatever is underneath. */
+  interactive?: boolean;
   /** CSS cursor shown while hovering; the deepest box that sets one wins. */
   cursor?: string | null;
   onClick?: BoxEventHandler | null;
@@ -99,15 +99,36 @@ const atlas = {
   button: new NineSlice({ x: 16, y: 16, w: 64, h: 52 }, { left: 12, top: 12, right: 12, bottom: 20 }),
   buttonHover: new NineSlice({ x: 96, y: 16, w: 64, h: 52 }, { left: 12, top: 12, right: 12, bottom: 20 }),
   buttonDown: new NineSlice({ x: 176, y: 16, w: 64, h: 52 }, { left: 12, top: 12, right: 12, bottom: 20 }),
+  font: {
+    /** Arial 16, ASCII 32..126; glyph i = code - 32 sits in cell (i % cols, i / cols). */
+    x: 0, y: 128, cols: 16, cell: 20,
+    /** Where the pen and baseline are inside a cell. */
+    penX: 2, baseline: 16,
+    /** Line box: baseline is `ascent` below the top. */
+    ascent: 14, lineHeight: 18,
+    // Measured from the browser's 16px Arial; must match the glyphs rendered in atlas.svg.
+    advances: [
+      4.445, 4.445, 5.68, 8.898, 8.898, 14.227, 10.672, 3.055, 5.328, 5.328, 6.227, 9.344, 4.445, 5.328, 4.445, 4.445,
+      8.898, 8.898, 8.898, 8.898, 8.898, 8.898, 8.898, 8.898, 8.898, 8.898, 4.445, 4.445, 9.344, 9.344, 9.344, 8.898,
+      16.242, 10.672, 10.672, 11.555, 11.555, 10.672, 9.773, 12.445, 11.555, 4.445, 8, 10.672, 8.898, 13.328, 11.555, 12.445,
+      10.672, 12.445, 11.555, 10.672, 9.773, 11.555, 10.672, 15.102, 10.672, 10.672, 9.773, 4.445, 4.445, 4.445, 7.508, 8.898,
+      5.328, 8.898, 8.898, 8, 8.898, 8.898, 4.445, 8.898, 8.898, 3.555, 3.555, 8, 3.555, 13.328, 8.898, 8.898,
+      8.898, 8.898, 5.328, 8, 4.445, 8.898, 8, 11.555, 8, 8, 8, 5.344, 4.156, 5.344, 9.344,
+    ],
+  },
 };
 
-// Placeholder until glyphs live in the atlas: measure with the browser's Arial 16.
-const TEXT_LINE_HEIGHT = 18;
-let textCtx: CanvasRenderingContext2D | null = null;
-function measureText(text: string) {
-  textCtx ??= document.createElement('canvas').getContext('2d')!;
-  textCtx.font = '16px Arial';
-  return { w: Math.ceil(textCtx.measureText(text).width), h: TEXT_LINE_HEIGHT };
+type Font = typeof atlas.font;
+
+/** Glyph index for a character; anything outside printable ASCII becomes '?'. */
+function glyphIndex(ch: number) {
+  return ch >= 32 && ch < 127 ? ch - 32 : 31;
+}
+
+function textWidth(font: Font, text: string) {
+  let w = 0;
+  for (let i = 0; i < text.length; i++) w += font.advances[glyphIndex(text.charCodeAt(i))];
+  return Math.ceil(w);
 }
 
 function paddingOf(box: UIBox) {
@@ -130,7 +151,7 @@ class UIBox {
   height: number | null = null;
   bg: NineSlice | null = null;
   color: string | null = null;
-  text: string | null = null;
+  interactive = true;
   cursor: string | null = null;
   onClick: BoxEventHandler | null = null;
 
@@ -208,6 +229,12 @@ class UIBox {
     return this;
   }
 
+  /** Emits this box's own quads (children are visited by the Surface). */
+  paint(s: Surface) {
+    if (this.bg) s.nineSlice(this.x, this.y, this.w, this.h, this.bg, this.color ? parseColor(this.color) : WHITE);
+    else if (this.color) s.solid(this.x, this.y, this.w, this.h, parseColor(this.color));
+  }
+
   /** Runs this box's handlers only; bubbling is the Surface's job. */
   emit(e: BoxEvent) {
     e.current = this;
@@ -227,17 +254,10 @@ const flex: ILayout = {
       cross = Math.max(cross, row ? c.minH : c.minW);
     }
     main += box.gap * Math.max(0, box.children.length - 1);
-    let contentW = row ? main : cross;
-    let contentH = row ? cross : main;
-    if (box.text) {
-      const t = measureText(box.text);
-      contentW = Math.max(contentW, t.w);
-      contentH = Math.max(contentH, t.h);
-    }
     const p = paddingOf(box);
     const bg = box.bg;
-    box.minW = Math.max(box.width ?? 0, bg ? bg.left + bg.right : 0, contentW + p.l + p.r);
-    box.minH = Math.max(box.height ?? 0, bg ? bg.top + bg.bottom : 0, contentH + p.t + p.b);
+    box.minW = Math.max(box.width ?? 0, bg ? bg.left + bg.right : 0, (row ? main : cross) + p.l + p.r);
+    box.minH = Math.max(box.height ?? 0, bg ? bg.top + bg.bottom : 0, (row ? cross : main) + p.t + p.b);
   },
 
   arrange(box) {
@@ -282,6 +302,71 @@ const flex: ILayout = {
     });
   },
 };
+
+// ---------------------------------------------------------------------------
+// Text: a leaf node holding one line of left-to-right ASCII in the atlas font.
+
+interface TextProps extends BoxProps {
+  text?: string;
+  font?: Font;
+  /** Drawn 1px below the text, under it. */
+  shadow?: string | null;
+}
+
+/** Min size is the line's advance width x line height; nothing to arrange. */
+const textLayout: ILayout = {
+  measure(box) {
+    const t = box as UIText;
+    t.minW = Math.max(t.width ?? 0, textWidth(t.font, t.text));
+    t.minH = Math.max(t.height ?? 0, t.font.lineHeight);
+  },
+  arrange() {},
+};
+
+class UIText extends UIBox {
+  layout: ILayout = textLayout;
+  /** Labels shouldn't steal the pointer from the widget they sit in. */
+  interactive = false;
+  /** Text colour (not a fill, unlike on UIBox). */
+  color: string | null = '#ffffff';
+  text = '';
+  font: Font = atlas.font;
+  shadow: string | null = null;
+
+  constructor(props: TextProps = {}) {
+    // Field initializers run after super(), so apply props only once they're in place.
+    super();
+    this.set(props);
+  }
+
+  set(props: TextProps): this {
+    return super.set(props);
+  }
+
+  paint(s: Surface) {
+    // Left-aligned, vertically centred if the box got taller than a line.
+    const top = this.y + (this.h - this.font.lineHeight) / 2;
+    if (this.shadow) this.paintGlyphs(s, top + 1, parseColor(this.shadow));
+    if (this.color) this.paintGlyphs(s, top, parseColor(this.color));
+  }
+
+  private paintGlyphs(s: Surface, top: number, color: number[]) {
+    const f = this.font;
+    // Snap to whole pixels so atlas texels map 1:1 and glyphs stay sharp.
+    const y = Math.round(top) + f.ascent - f.baseline;
+    let pen = this.x;
+    for (let i = 0; i < this.text.length; i++) {
+      const g = glyphIndex(this.text.charCodeAt(i));
+      if (g !== 0) {
+        const x = Math.round(pen) - f.penX;
+        const u = f.x + (g % f.cols) * f.cell;
+        const v = f.y + Math.floor(g / f.cols) * f.cell;
+        s.quad(x, y, x + f.cell, y + f.cell, u, v, u + f.cell, v + f.cell, color);
+      }
+      pen += f.advances[g];
+    }
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Rendering
@@ -415,9 +500,9 @@ class Surface {
     return [e.clientX - r.left, e.clientY - r.top];
   }
 
-  /** Walks down from the root, taking the topmost (last) child under the point at each level. */
+  /** Walks down from the root, taking the topmost (last) interactive child under the point at each level. */
   hitTest(x: number, y: number): UIBox[] {
-    const inside = (b: UIBox) => x >= b.x && y >= b.y && x < b.x + b.w && y < b.y + b.h;
+    const inside = (b: UIBox) => b.interactive && x >= b.x && y >= b.y && x < b.x + b.w && y < b.y + b.h;
     const path: UIBox[] = [];
     let b: UIBox | null = inside(this.root) ? this.root : null;
     while (b) {
@@ -522,13 +607,13 @@ class Surface {
     root.h = cssH;
     root.layout.arrange(root);
 
-    let n = 0;
+    this.n = 0;
     const visit = (b: UIBox) => {
-      if (b.bg) n = this.pushNineSlice(n, b, b.bg, b.color ? parseColor(b.color) : WHITE);
-      else if (b.color) n = this.pushQuad(n, b.x, b.y, b.x + b.w, b.y + b.h, atlas.white.x, atlas.white.y, atlas.white.x, atlas.white.y, parseColor(b.color));
+      b.paint(this);
       for (const c of b.children) visit(c);
     };
     visit(root);
+    const n = this.n;
 
     gl.viewport(0, 0, pxW, pxH);
     gl.clearColor(0, 0, 0, 1);
@@ -544,29 +629,39 @@ class Surface {
     this.onRender?.(this);
   }
 
-  private pushNineSlice(n: number, b: UIBox, s: NineSlice, color: number[]) {
+  // --- painting API used by UIBox.paint(); only valid during render()
+
+  /** Floats written to `data` so far this frame. */
+  private n = 0;
+
+  /** Solid rectangle, sampled from the atlas's white block. */
+  solid(x: number, y: number, w: number, h: number, color: number[]) {
+    const { x: u, y: v } = atlas.white;
+    this.quad(x, y, x + w, y + h, u, v, u, v, color);
+  }
+
+  nineSlice(x: number, y: number, w: number, h: number, s: NineSlice, color: number[]) {
     // If the box is smaller than the fixed corners, shrink the corners proportionally.
-    const kx = Math.min(1, b.w / (s.left + s.right || 1));
-    const ky = Math.min(1, b.h / (s.top + s.bottom || 1));
-    const xs = [b.x, b.x + s.left * kx, b.x + b.w - s.right * kx, b.x + b.w];
-    const ys = [b.y, b.y + s.top * ky, b.y + b.h - s.bottom * ky, b.y + b.h];
+    const kx = Math.min(1, w / (s.left + s.right || 1));
+    const ky = Math.min(1, h / (s.top + s.bottom || 1));
+    const xs = [x, x + s.left * kx, x + w - s.right * kx, x + w];
+    const ys = [y, y + s.top * ky, y + h - s.bottom * ky, y + h];
     const us = [s.x, s.x + s.left, s.x + s.w - s.right, s.x + s.w];
     const vs = [s.y, s.y + s.top, s.y + s.h - s.bottom, s.y + s.h];
     for (let j = 0; j < 3; j++) {
       for (let i = 0; i < 3; i++) {
         if (xs[i + 1] <= xs[i] || ys[j + 1] <= ys[j]) continue;
-        n = this.pushQuad(n, xs[i], ys[j], xs[i + 1], ys[j + 1], us[i], vs[j], us[i + 1], vs[j + 1], color);
+        this.quad(xs[i], ys[j], xs[i + 1], ys[j + 1], us[i], vs[j], us[i + 1], vs[j + 1], color);
       }
     }
-    return n;
   }
 
   /** Positions in CSS pixels, UVs in atlas pixels. */
-  private pushQuad(
-    n: number, x0: number, y0: number, x1: number, y1: number,
+  quad(
+    x0: number, y0: number, x1: number, y1: number,
     u0: number, v0: number, u1: number, v1: number, [r, g, b, a]: number[],
   ) {
-    if (n + FLOATS_PER_QUAD > this.data.length) {
+    if (this.n + FLOATS_PER_QUAD > this.data.length) {
       const bigger = new Float32Array(this.data.length * 2);
       bigger.set(this.data);
       this.data = bigger;
@@ -574,12 +669,11 @@ class Surface {
     const k = 1 / atlas.size;
     u0 *= k; v0 *= k; u1 *= k; v1 *= k;
     for (const [x, y, u, v] of [[x0, y0, u0, v0], [x1, y0, u1, v0], [x0, y1, u0, v1], [x0, y1, u0, v1], [x1, y0, u1, v0], [x1, y1, u1, v1]]) {
-      this.data.set([x, y, u, v, r, g, b, a], n);
-      n += FLOATS_PER_VERTEX;
+      this.data.set([x, y, u, v, r, g, b, a], this.n);
+      this.n += FLOATS_PER_VERTEX;
     }
-    return n;
   }
 }
 
-const UI = { UIBox, NineSlice, BoxEvent, Surface, Alignment, Direction, atlas, layouts: { flex } };
-Object.assign(window, { UI, UIBox, NineSlice, BoxEvent, Alignment, Direction });
+const UI = { UIBox, UIText, NineSlice, BoxEvent, Surface, Alignment, Direction, atlas, layouts: { flex, text: textLayout } };
+Object.assign(window, { UI, UIBox, UIText, NineSlice, BoxEvent, Alignment, Direction });
